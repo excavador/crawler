@@ -170,7 +170,6 @@ class Crawler(object):
             self.worker_pool.append(gevent.spawn(self.worker, worker_index))
         self.put(url)
 
-
     def put(self, url):
         if url not in self.started:
             self.started.add(url)
@@ -233,7 +232,7 @@ class Crawler(object):
             else:
                 body = self.fetch(logger, url)
             self.parse(logger, body)
- 
+
     def worker(self, worker_index):
         try:
             self._worker_(worker_index)
@@ -247,6 +246,7 @@ class Crawler(object):
     def stop(self):
         self.work = False
         self.queue.put(StopIteration)
+
 
 def main():
     gevent.monkey.patch_all()
