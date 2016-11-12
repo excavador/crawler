@@ -1,0 +1,14 @@
+#!/bin/bash
+
+set -eu
+
+ROOT=$(dirname $(dirname $(realpath ${BASH_SOURCE[0]})))
+VENV=${ROOT}/venv
+
+make -s -C "${ROOT}" venv
+set +u
+source ${VENV}/bin/activate
+set -u
+find ${ROOT} -name "*.pyc" -delete
+"$@"
+

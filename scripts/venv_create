@@ -1,0 +1,11 @@
+#!/bin/bash
+
+set -eu
+
+ROOT=$(dirname $(dirname $(realpath ${BASH_SOURCE[0]})))
+VENV=${ROOT}/venv
+rm -rf ${VENV}
+virtualenv ${VENV}
+${ROOT}/scripts/venv pip install --upgrade pip
+${ROOT}/scripts/venv pip install --upgrade setuptools
+${ROOT}/scripts/venv pip --no-cache-dir install -r requirements.txt
