@@ -136,6 +136,8 @@ class LinkExtractor(HTMLParser.HTMLParser):
 
 
 def extract_urls(body):
+    if not body:
+        return []
     parser = LinkExtractor()
     parser.feed(body)
     return parser.result
@@ -194,15 +196,20 @@ class Crawler(object):
         for url in extract_urls(body):
             parsed_url = urlparse.urlparse(url)
 
+            # check relative
+            if not parsed_url.netloc:
+                result.append(self.scheme + '://' + self.netloc + url)
+                continue
+
             # check domain
             if parsed_url.netloc != self.netloc:
                 continue
 
             # substitute scheme for '//:...'
             if not parsed_url.scheme:
-                url = self.scheme + ':' + url
+                result.append(self.scheme + ':' + url)
+                continue
 
-            result.append(url)
 
         return result
 
