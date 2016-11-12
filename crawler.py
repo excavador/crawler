@@ -3,17 +3,23 @@
 
 import argparse
 import codecs
-import HTMLParser 
+import HTMLParser
 import json
 import logging
 import os
 import os.path
 import requests
+import gevent
+import gevent.queue
+import gevent.monkey
 import time
 import urlparse
 
 
-logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(message)s')
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(name)s %(levelname)s %(lineno)s %(message)s'
+)
 logging.getLogger("requests").setLevel(logging.ERROR)
 logging.getLogger("crawler").setLevel(logging.DEBUG)
 logger = logging.getLogger('crawler')
@@ -27,6 +33,7 @@ def save_file(file_name, content):
     with codecs.open(temp_file_path, 'w', 'utf-8') as file:
         file.write(content)
     os.rename(temp_file_path, file_path)
+
 
 def load_file(file_name):
     file_path = os.path.join(RESULT_DIR, file_name)
@@ -59,13 +66,13 @@ class Storage(object):
     def add_valid(self, url, body):
         self.check_before_add(url)
         file_name = '{}.page'.format(self.next)
-
-        logger.info("save %s to %s", url, file_name)
         save_file(file_name, body)
 
         self.valid[url] = file_name
         self.next += 1
         self.save_if_required()
+
+        return file_name
 
     def add_wrong(self, url, code=None, content_type=None):
         self.check_before_add(url)
@@ -98,7 +105,7 @@ class Storage(object):
         logger.info('Storage.load start %s', self.file_name)
         data = load_file(self.file_name)
         if data is None:
-            logger.info('Storage.load ommitted %s', self.file_path)
+            logger.info('Storage.load ommitted %s', self.file_name)
             return
         data = json.loads(data)
         self.valid = data.get('valid', {})
@@ -107,32 +114,13 @@ class Storage(object):
         logger.info('Storage.load done %s', self.file_name)
 
 
-class Scheduler(object):
-    def __init__(self):
-        self.set = set()
-        self.list = []
-
-    def add(self, url):
-        if url in self.set:
-            return
-        self.set.add(url)
-        self.list.append(url)
-
-    def get(self):
-        if not self.list:
-            return
-        result = self.list[0]
-        self.list = self.list[1:]
-        return result
-
-
 class LinkExtractor(HTMLParser.HTMLParser):
     CATCH = {
         'a': 'href',
         'link': 'href',
         'script': 'src',
     }
- 
+
     def __init__(self):
         HTMLParser.HTMLParser.__init__(self)
         self.result = []
@@ -161,49 +149,31 @@ def valid_content_type(content_type):
         return True
     return False
 
+
 class Crawler(object):
     def __init__(self, url, parallel):
         target = urlparse.urlparse(url)
         self.scheme = target.scheme
         self.netloc = target.netloc
+        self.parallel = parallel
+
         self.storage = Storage()
         self.storage.load()
-        self.scheduler = Scheduler()
-        self.scheduler.add(url)
 
-    def process(self, url):
-        logger.debug("url %s start processing", url)
-        wrong = self.storage.get_wrong(url)
-        if wrong:
-            logger.debug("url %s is wrong (code=%s, content_type",
-                url, wrong.get('code'), wrong.get('content_type'))
-            return
-        body = self.storage.get_valid(url)
+        self.started = set()
+        self.queue = gevent.queue.Queue()
 
-        if body:
-            logger.debug("url %s found saved", url)
-        else:
-            logger.debug("url %s request", url)
-            response = requests.get(url)
-            code = response.status_code
-            content_type = response.headers.get('content-type')
+        self.worker_pool = []
+        for worker_index in range(parallel):
+            self.worker_pool.append(gevent.spawn(self.worker, worker_index))
+        self.put(url)
 
-            # analyze status code
-            if code != 200:
-                logger.debug("url %s wrong status code", url, code)
-                self.index.add_wrong(url, code=code, content_type=content_type)
-                return
+    def put(self, url):
+        if url not in self.started:
+            self.started.add(url)
+            self.queue.put(url)
 
-            # analyze content-type
-            if not valid_content_type(content_type):
-                logger.debug("url %s wrong content-type %s", url, content_type)
-                self.storage.add_wrong(url, code=code, content_type=content_type)
-                return
-
-            # # get body
-            body = response.content.decode('utf-8')
-            self.storage.add_valid(url, body)
-
+    def parse(self, logger, body):
         for url in extract_urls(body):
             parsed_url = urlparse.urlparse(url)
 
@@ -215,17 +185,57 @@ class Crawler(object):
             if not parsed_url.scheme:
                 url = self.scheme + ':' + url
 
-            self.scheduler.add(url)
+            self.put(url)
 
-    def loop(self):
-        while True:
-            url = self.scheduler.get()
-            if not url:
-                break
-            self.process(url)
+    def fetch(self, logger, url):
+        logger.debug("url fetch %s", url)
+        response = requests.get(url)
+        code = response.status_code
+        content_type = response.headers.get('content-type')
+
+        # analyze status code
+        if code != 200:
+            logger.debug("url wrong status code %s %s ", code, url)
+            self.index.add_wrong(url, code=code, content_type=content_type)
+            return
+
+        # analyze content-type
+        if not valid_content_type(content_type):
+            logger.debug("url wrong content-type %s %s", content_type, url)
+            self.storage.add_wrong(url, code=code, content_type=content_type)
+            return
+
+        # # get body
+        body = response.content.decode('utf-8')
+        file_name = self.storage.add_valid(url, body)
+        logger.debug('url %s saved to %s', url, file_name)
+
+        return body
+
+    def worker(self, worker_index):
+        logger = logging.getLogger('crawler.worker.{}'.format(worker_index))
+        for url in self.queue:
+            logger.debug("start %s", url)
+            wrong = self.storage.get_wrong(url)
+            if wrong:
+                logger.debug("url %s is wrong (code=%s, content_type",
+                             url, wrong.get('code'), wrong.get('content_type'))
+                return
+
+            body = self.storage.get_valid(url)
+            if body:
+                logger.debug("url %s found", url)
+            else:
+                body = self.fetch(logger, url)
+            self.parse(logger, body)
+
+    def join(self):
+        gevent.joinall(self.worker_pool)
 
 
 def main():
+    gevent.monkey.patch_all()
+
     parser = argparse.ArgumentParser(description='Crawler')
     parser.add_argument('url', type=str)
     parser.add_argument('--parallel', default=4, type=int)
@@ -239,9 +249,8 @@ def main():
         os.mkdir(RESULT_DIR)
 
     crawler = Crawler(result.url, result.parallel)
-    crawler.loop()
+    crawler.join()
 
 
 if __name__ == '__main__':
     main()
-
