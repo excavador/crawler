@@ -1,3 +1,4 @@
 gevent
 requests
 pep8
+PyYAML

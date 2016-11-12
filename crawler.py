@@ -4,7 +4,6 @@
 import argparse
 import codecs
 import HTMLParser
-import json
 import logging
 import os
 import os.path
@@ -14,6 +13,7 @@ import gevent.queue
 import gevent.monkey
 import time
 import urlparse
+import yaml
 
 
 logging.basicConfig(
@@ -44,9 +44,7 @@ def load_file(file_name):
         return None
 
 
-class Storage(object):
-    FILE_NAME = 'index.txt'
-
+class Index(object):
     def __init__(self):
         self.valid = dict()
         self.wrong = dict()
@@ -55,7 +53,7 @@ class Storage(object):
 
     @property
     def file_name(self):
-        return 'url-map.txt'
+        return 'index.yaml'
 
     def check_before_add(self, url):
         if self.get_valid(url):
@@ -94,24 +92,27 @@ class Storage(object):
             self.saved = now
 
     def save(self):
-        logger.info('Storage.save start')
+        logger.info('save index start')
         data = dict(valid=self.valid, wrong=self.wrong, next=self.next)
-        data = json.dumps(data)
+        data = yaml.dump(data)
         save_file(self.file_name, data)
         self.saved = int(time.time())
-        logger.info('Storage.save done')
+        logger.info('save index done')
 
     def load(self):
-        logger.info('Storage.load start %s', self.file_name)
+        logger.info('load index start')
         data = load_file(self.file_name)
         if data is None:
-            logger.info('Storage.load ommitted %s', self.file_name)
+            logger.info('load index empty %s', self.file_name)
             return
-        data = json.loads(data)
+        try:
+            data = yaml.load(data)
+        except BaseException as error:
+            logger.error('load index %s problem %s', self.file_name, error)
         self.valid = data.get('valid', {})
         self.wrong = data.get('wrong', {})
         self.next = data.get('next', 1)
-        logger.info('Storage.load done %s', self.file_name)
+        logger.info('load index done')
 
 
 class LinkExtractor(HTMLParser.HTMLParser):
@@ -157,8 +158,8 @@ class Crawler(object):
         self.netloc = target.netloc
         self.parallel = parallel
 
-        self.storage = Storage()
-        self.storage.load()
+        self.index = Index()
+        self.index.load()
 
         self.started = set()
         self.queue = gevent.queue.Queue()
@@ -204,12 +205,12 @@ class Crawler(object):
         # analyze content-type
         if not valid_content_type(content_type):
             logger.debug("url wrong content-type %s %s", content_type, url)
-            self.storage.add_wrong(url, code=code, content_type=content_type)
+            self.index.add_wrong(url, code=code, content_type=content_type)
             return
 
         # # get body
         body = response.content.decode('utf-8')
-        file_name = self.storage.add_valid(url, body)
+        file_name = self.index.add_valid(url, body)
         logger.debug('url %s saved to %s', url, file_name)
 
         return body
@@ -220,13 +221,13 @@ class Crawler(object):
             if not self.work:
                 return
             logger.debug("start %s", url)
-            wrong = self.storage.get_wrong(url)
+            wrong = self.index.get_wrong(url)
             if wrong:
                 logger.debug("url %s is wrong (code=%s, content_type",
                              url, wrong.get('code'), wrong.get('content_type'))
                 return
 
-            body = self.storage.get_valid(url)
+            body = self.index.get_valid(url)
             if body:
                 logger.debug("url %s found", url)
             else:
@@ -241,6 +242,7 @@ class Crawler(object):
 
     def join(self):
         gevent.joinall(self.worker_pool)
+        self.index.save()
 
     def stop(self):
         self.work = False
