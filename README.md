@@ -5,6 +5,7 @@ example of usage:
 ./scripts/venv ./crawler.py --parallel=16 http://yandex.ru/
 ./scripts/venv ./crawler.py --parallel=16 http://google.ru/
 ./scripts/venv ./crawler.py --parallel=16 http://htmlbook.ru/
+./scripts/venv ./crawler.py --parallel=16 http://habrahabr.ru/
 ```
 
 # потраченное время
