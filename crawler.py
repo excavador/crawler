@@ -8,8 +8,8 @@ import logging
 import os
 import os.path
 import requests
-import gevent
 import gevent.queue
+import gevent.pool
 import gevent.monkey
 import time
 import urlparse
@@ -142,40 +142,55 @@ def extract_urls(body):
 
 
 def valid_content_type(content_type):
-    if content_type.startswith('text/html'):
-        return True
-    if content_type.startswith('text/xml'):
-        return True
-    if content_type.startswith('application/rss+xml'):
-        return True
+    for prefix in ['text/html', 'text/xml', 'application/rss+xml', 'text/css']:
+        if content_type.startswith(prefix):
+            return True
     return False
 
 
 class Crawler(object):
-    def __init__(self, url, parallel):
+    def __init__(self, url):
         target = urlparse.urlparse(url)
         self.scheme = target.scheme
         self.netloc = target.netloc
-        self.parallel = parallel
+        self.url = url
 
         self.index = Index()
         self.index.load()
 
-        self.started = set()
-        self.queue = gevent.queue.Queue()
+        self.todo = gevent.queue.Queue()
+        self.cancel = False
 
-        self.work = True
-        self.worker_pool = []
-        for worker_index in range(parallel):
-            self.worker_pool.append(gevent.spawn(self.worker, worker_index))
-        self.put(url)
+    # ugly boilerplate for manage workers
+    def run(self, parallel):
+        pool = gevent.pool.Pool(parallel)
+        known = set()
+        left = 1
+        self.todo.put((None, [self.url]))
 
-    def put(self, url):
-        if url not in self.started:
-            self.started.add(url)
-            self.queue.put(url)
+        try:
+            for (url, children) in self.todo:
+                left -= 1
+                for url in children:
+                    if self.cancel:
+                        break
+                    if url not in known:
+                        left += 1
+                        pool.spawn(self.process, url)
+                    known.add(url)
+                if left == 0:
+                    break
+                if self.cancel:
+                    break
+        except KeyboardInterrupt:
+            pass
 
-    def parse(self, logger, body):
+        pool.join()
+        self.index.save()
+
+    def _parse_(self, body):
+        result = []
+
         for url in extract_urls(body):
             parsed_url = urlparse.urlparse(url)
 
@@ -187,9 +202,11 @@ class Crawler(object):
             if not parsed_url.scheme:
                 url = self.scheme + ':' + url
 
-            self.put(url)
+            result.append(url)
 
-    def fetch(self, logger, url):
+        return result
+
+    def _fetch_(self, url):
         logger.debug("url fetch %s", url)
         response = requests.get(url)
         code = response.status_code
@@ -208,44 +225,40 @@ class Crawler(object):
             return
 
         # # get body
-        body = response.content.decode('utf-8')
+        body = response.text
         file_name = self.index.add_valid(url, body)
         logger.debug('url %s saved to %s', url, file_name)
 
         return body
 
-    def _worker_(self, worker_index):
-        logger = logging.getLogger('crawler.worker.{}'.format(worker_index))
-        for url in self.queue:
-            if not self.work:
-                return
-            logger.debug("start %s", url)
-            wrong = self.index.get_wrong(url)
-            if wrong:
-                logger.debug("url %s is wrong (code=%s, content_type",
-                             url, wrong.get('code'), wrong.get('content_type'))
-                return
+    def _process_(self, url):
+        logger.debug("start %s", url)
 
-            body = self.index.get_valid(url)
-            if body:
-                logger.debug("url %s found", url)
-            else:
-                body = self.fetch(logger, url)
-            self.parse(logger, body)
+        # check in index for wrong
+        wrong = self.index.get_wrong(url)
+        if wrong:
+            logger.debug("url %s is wrong (code=%s, content_type",
+                         url, wrong.get('code'), wrong.get('content_type'))
+            return
 
-    def worker(self, worker_index):
+        # check in index for valid
+        body = self.index.get_valid(url)
+        if body:
+            logger.debug("url %s found", url)
+        else:
+            # fetch
+            body = self._fetch_(url)
+
+        # parse
+        children = self._parse_(body)
+
+        self.todo.put((url, children))
+
+    def process(self, url):
         try:
-            self._worker_(worker_index)
+            self._process_(url)
         except KeyboardInterrupt:
-            self.stop()
-
-    def join(self):
-        gevent.joinall(self.worker_pool)
-        self.index.save()
-
-    def stop(self):
-        self.work = False
-        self.queue.put(StopIteration)
+            self.cancel = True
 
 
 def main():
@@ -263,12 +276,8 @@ def main():
     if not os.path.exists(RESULT_DIR):
         os.mkdir(RESULT_DIR)
 
-    crawler = Crawler(result.url, result.parallel)
-    try:
-        crawler.join()
-    except KeyboardInterrupt:
-        crawler.stop()
-        crawler.join()
+    crawler = Crawler(result.url)
+    crawler.run(result.parallel)
 
 
 if __name__ == '__main__':
