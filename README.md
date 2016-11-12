@@ -2,7 +2,9 @@
 
 example of usage:
 ```
-./scripts/venv ./crawler.py http://yandex.ru/ --parallel=16
+./scripts/venv ./crawler.py --parallel=16 http://yandex.ru/
+./scripts/venv ./crawler.py --parallel=16 http://google.ru/
+./scripts/venv ./crawler.py --parallel=16 http://htmlbook.ru/
 ```
 
 # потраченное время
