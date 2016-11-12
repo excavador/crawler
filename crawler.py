@@ -210,7 +210,6 @@ class Crawler(object):
                 result.append(self.scheme + ':' + url)
                 continue
 
-
         return result
 
     def _fetch_(self, url):
