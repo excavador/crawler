@@ -18,7 +18,7 @@ import urlparse
 
 logging.basicConfig(
     level=logging.DEBUG,
-    format='%(name)s %(levelname)s %(lineno)s %(message)s'
+    format='%(name)s %(levelname)s %(filename)s:%(lineno)s %(message)s'
 )
 logging.getLogger("requests").setLevel(logging.ERROR)
 logging.getLogger("crawler").setLevel(logging.DEBUG)
@@ -163,10 +163,12 @@ class Crawler(object):
         self.started = set()
         self.queue = gevent.queue.Queue()
 
+        self.work = True
         self.worker_pool = []
         for worker_index in range(parallel):
             self.worker_pool.append(gevent.spawn(self.worker, worker_index))
         self.put(url)
+
 
     def put(self, url):
         if url not in self.started:
@@ -212,9 +214,11 @@ class Crawler(object):
 
         return body
 
-    def worker(self, worker_index):
+    def _worker_(self, worker_index):
         logger = logging.getLogger('crawler.worker.{}'.format(worker_index))
         for url in self.queue:
+            if not self.work:
+                return
             logger.debug("start %s", url)
             wrong = self.storage.get_wrong(url)
             if wrong:
@@ -228,10 +232,19 @@ class Crawler(object):
             else:
                 body = self.fetch(logger, url)
             self.parse(logger, body)
+ 
+    def worker(self, worker_index):
+        try:
+            self._worker_(worker_index)
+        except KeyboardInterrupt:
+            self.stop()
 
     def join(self):
         gevent.joinall(self.worker_pool)
 
+    def stop(self):
+        self.work = False
+        self.queue.put(StopIteration)
 
 def main():
     gevent.monkey.patch_all()
@@ -249,7 +262,11 @@ def main():
         os.mkdir(RESULT_DIR)
 
     crawler = Crawler(result.url, result.parallel)
-    crawler.join()
+    try:
+        crawler.join()
+    except KeyboardInterrupt:
+        crawler.stop()
+        crawler.join()
 
 
 if __name__ == '__main__':
