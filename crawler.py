@@ -204,7 +204,7 @@ class Crawler(object):
 
             # check relative
             if not parsed_url.netloc:
-                result.append(self.scheme + '://' + self.netloc + url)
+                result.append(self.scheme + '://' + self.netloc + '/' + url)
                 continue
 
             # check domain
