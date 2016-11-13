@@ -1,5 +1,7 @@
 #!/usr/bin/env python2.7
 
+import gevent.monkey
+gevent.monkey.patch_all()
 
 import argparse
 import codecs
@@ -10,7 +12,6 @@ import os.path
 import requests
 import gevent.queue
 import gevent.pool
-import gevent.monkey
 import time
 import urlparse
 import yaml
@@ -194,6 +195,11 @@ class Crawler(object):
         result = []
 
         for url in extract_urls(body):
+            if url.startswith('javascript'):
+                continue
+            if url.startswith('mailto'):
+                continue
+
             parsed_url = urlparse.urlparse(url)
 
             # check relative
@@ -268,8 +274,6 @@ class Crawler(object):
 
 
 def main():
-    gevent.monkey.patch_all()
-
     parser = argparse.ArgumentParser(description='Crawler')
     parser.add_argument('url', type=str)
     parser.add_argument('--parallel', default=4, type=int)
